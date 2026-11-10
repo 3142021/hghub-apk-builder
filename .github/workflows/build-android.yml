@@ -1,0 +1,117 @@
+name: Build HGhub APK
+
+# 触发方式：首次 push 自动跑，也可以在 Actions 页面点 "Run workflow"
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      - name: Clone upstream HGhub source
+        run: |
+          git clone --depth 1 https://github.com/Minireel/HGhub.git app
+          echo "upstream commit: $(git -C app rev-parse --short HEAD)"
+          grep -E '"version"|minSdkVersion' app/package.json app/src-tauri/tauri.conf.json || true
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm 10
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+          log-accepted-android-sdk-licenses: true
+
+      - name: Install NDK
+        run: |
+          # Tauri 2 的 Android 工具链对 NDK 版本敏感，27 与 26 都装上做兜底
+          yes | sdkmanager --install "ndk;27.0.12077973" > /dev/null 2>&1 || echo "NDK 27 install failed"
+          yes | sdkmanager --install "ndk;26.3.11579264" > /dev/null 2>&1 || echo "NDK 26 install failed"
+          echo "--- installed NDKs ---"
+          ls "$ANDROID_SDK_ROOT/ndk" || true
+          NDK_DIR="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          if [ ! -d "$NDK_DIR" ]; then NDK_DIR="$ANDROID_SDK_ROOT/ndk/26.3.11579264"; fi
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "using NDK: $NDK_DIR"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+          key: android
+
+      - name: Check toolchain versions
+        run: |
+          node -v && pnpm -v && java -version && rustc -V && cargo -V
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "NDK_HOME=$NDK_HOME"
+
+      - name: pnpm install
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Init Android project
+        working-directory: app
+        run: pnpm exec tauri android init --ci
+
+      - name: Build debug APK
+        working-directory: app
+        run: pnpm exec tauri android build --apk --debug
+
+      - name: Collect APK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find app/src-tauri/gen/android/app/build/outputs -name "*.apk" -print -exec cp {} "$GITHUB_WORKSPACE/out/" \;
+          echo "--- collected ---"
+          ls -lh "$GITHUB_WORKSPACE/out"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hghub-apk
+          path: out/*.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: HGhub APK (build ${{ github.run_number }})
+          body: |
+            由 GitHub Actions 从上游 Minireel/HGhub 源码构建的 Android 调试包。
+            仅限个人学习自用，遵循上游 PolyForm Noncommercial 1.0.0 许可证，禁止商业使用。
+          files: out/*.apk
+          fail_on_unmatched_files: false
