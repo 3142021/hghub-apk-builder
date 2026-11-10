@@ -1,6 +1,5 @@
-name: Build HGhub APK
+name: Build HGhub APK (arm64 release)
 
-# 触发方式：首次 push 自动跑，也可以在 Actions 页面点 "Run workflow"
 on:
   push:
     branches: [main]
@@ -12,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
 
     steps:
       - name: Checkout builder repo
@@ -48,7 +47,6 @@ jobs:
 
       - name: Install NDK
         run: |
-          # Tauri 2 的 Android 工具链对 NDK 版本敏感，27 与 26 都装上做兜底
           yes | sdkmanager --install "ndk;27.0.12077973" > /dev/null 2>&1 || echo "NDK 27 install failed"
           yes | sdkmanager --install "ndk;26.3.11579264" > /dev/null 2>&1 || echo "NDK 26 install failed"
           echo "--- installed NDKs ---"
@@ -62,19 +60,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri -> target
-          key: android
-
-      - name: Check toolchain versions
-        run: |
-          node -v && pnpm -v && java -version && rustc -V && cargo -V
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "NDK_HOME=$NDK_HOME"
+          key: android-arm64
 
       - name: pnpm install
         working-directory: app
@@ -84,22 +76,79 @@ jobs:
         working-directory: app
         run: pnpm exec tauri android init --ci
 
-      - name: Build debug APK
+      - name: Generate release keystore and inject signing config
         working-directory: app
-        run: pnpm exec tauri android build --apk --debug
+        env:
+          KS_PASS: hghub_selfuse_2026
+        run: |
+          keytool -genkeypair -v \
+            -keystore src-tauri/gen/android/hghub.jks \
+            -storepass "$KS_PASS" -keypass "$KS_PASS" \
+            -alias hghub -keyalg RSA -keysize 2048 -validity 36500 \
+            -dname "CN=hghub, OU=personal, O=self-use, L=local, S=local, C=CN"
+          python3 - <<'PYEOF'
+          import re
+          p = 'src-tauri/gen/android/app/build.gradle.kts'
+          s = open(p, encoding='utf-8').read()
+          if 'signingConfigs' in s:
+              print('已存在 signingConfigs，跳过注入')
+          else:
+              ks_pass = 'hghub_selfuse_2026'
+              signing_block = (
+                  '    signingConfigs {\n'
+                  '        create("release") {\n'
+                  f'            storeFile = file("../hghub.jks")\n'
+                  f'            storePassword = "{ks_pass}"\n'
+                  '            keyAlias = "hghub"\n'
+                  f'            keyPassword = "{ks_pass}"\n'
+                  '        }\n'
+                  '    }\n'
+              )
+              # 在 android { 块内、buildTypes 之前插入 signingConfigs
+              s = s.replace('android {', 'android {\n' + signing_block, 1)
+              # 给 release buildType 挂上签名
+              s2, n = re.subn(
+                  r'(buildTypes\s*\{\s*getByName\("release"\)\s*\{)',
+                  r'\1\n            signingConfig = signingConfigs.getByName("release")',
+                  s, count=1)
+              if n == 0:
+                  # 兜底：模板可能是 release { } 形式
+                  s2, n = re.subn(
+                      r'(buildTypes\s*\{\s*release\s*\{)',
+                      r'\1\n            signingConfig = signingConfigs.getByName("release")',
+                      s, count=1)
+              assert n > 0, '未能定位 release buildType'
+              open(p, 'w', encoding='utf-8').write(s2)
+              print('签名配置已注入 build.gradle.kts')
+          PYEOF
+          echo '--- build.gradle.kts 签名相关片段 ---'
+          grep -n -A6 "signingConfigs\|signingConfig" src-tauri/gen/android/app/build.gradle.kts || true
+
+      - name: Build release APK (arm64)
+        working-directory: app
+        run: pnpm exec tauri android build --apk --target aarch64
 
       - name: Collect APK
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find app/src-tauri/gen/android/app/build/outputs -name "*.apk" -print -exec cp {} "$GITHUB_WORKSPACE/out/" \;
-          echo "--- collected ---"
-          ls -lh "$GITHUB_WORKSPACE/out"
+          find app/src-tauri/gen/android/app/build/outputs -name "*.apk" -print
+          find app/src-tauri/gen/android/app/build/outputs -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/out/" \;
+          cd "$GITHUB_WORKSPACE/out"
+          rm -f HGhub-arm64-release.apk
+          cp "$(ls *.apk | head -1)" HGhub-arm64-release.apk
+          rm -f $(ls *.apk | grep -v HGhub || true)
+          ls -lh
+
+      - name: Verify APK signature
+        run: |
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/34.0.0/apksigner"
+          "$APKSIGNER" verify --print-certs out/HGhub-arm64-release.apk && echo "签名校验通过" || echo "签名校验失败（不影响上传）"
 
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hghub-apk
+          name: hghub-arm64-apk
           path: out/*.apk
           if-no-files-found: warn
           retention-days: 30
@@ -108,10 +157,10 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: apk-${{ github.run_number }}
-          name: HGhub APK (build ${{ github.run_number }})
+          tag_name: apk-arm64-${{ github.run_number }}
+          name: HGhub arm64 Release APK (build ${{ github.run_number }})
           body: |
-            由 GitHub Actions 从上游 Minireel/HGhub 源码构建的 Android 调试包。
+            单架构（arm64-v8a）release 优化构建，自签证书签名。
             仅限个人学习自用，遵循上游 PolyForm Noncommercial 1.0.0 许可证，禁止商业使用。
           files: out/*.apk
           fail_on_unmatched_files: false
