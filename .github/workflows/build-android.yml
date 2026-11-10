@@ -90,6 +90,9 @@ jobs:
           import re
           p = 'src-tauri/gen/android/app/build.gradle.kts'
           s = open(p, encoding='utf-8').read()
+          print('--- 原始 build.gradle.kts ---')
+          print(s)
+          print('--- 结束 ---')
           if 'signingConfigs' in s:
               print('已存在 signingConfigs，跳过注入')
           else:
@@ -105,16 +108,19 @@ jobs:
                   '    }\n'
               )
               # 在 android { 块内、buildTypes 之前插入 signingConfigs
+              assert 'android {' in s, '未能定位 android 块'
               s = s.replace('android {', 'android {\n' + signing_block, 1)
-              # 给 release buildType 挂上签名
+              # 给 release buildType 挂上签名。Tauri 模板中 buildTypes 里
+              # 先定义 debug 再定义 release，所以直接锚定 getByName("release")
+              # 本身，不假设它紧跟 buildTypes {
               s2, n = re.subn(
-                  r'(buildTypes\s*\{\s*getByName\("release"\)\s*\{)',
+                  r'(getByName\("release"\)\s*\{)',
                   r'\1\n            signingConfig = signingConfigs.getByName("release")',
                   s, count=1)
               if n == 0:
-                  # 兜底：模板可能是 release { } 形式
+                  # 兜底：其他形式的 release 块
                   s2, n = re.subn(
-                      r'(buildTypes\s*\{\s*release\s*\{)',
+                      r'(\brelease\s*\{)',
                       r'\1\n            signingConfig = signingConfigs.getByName("release")',
                       s, count=1)
               assert n > 0, '未能定位 release buildType'
