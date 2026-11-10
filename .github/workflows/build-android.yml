@@ -93,6 +93,12 @@ jobs:
           print('--- 原始 build.gradle.kts ---')
           print(s)
           print('--- 结束 ---')
+          # 关闭 release 的 R8 混淆：R8 会裁剪/混淆 Rust 通过 JNI 反射调用的
+          # Kotlin 桥接类，导致前端调不到 Rust 命令，表现为 app 打开后无内容。
+          # 关掉后 dex 不裁剪不混淆，包体略增但功能完整。
+          if 'isMinifyEnabled = true' in s:
+              s = s.replace('isMinifyEnabled = true', 'isMinifyEnabled = false')
+              print('已关闭 release R8 混淆')
           if 'signingConfigs' in s:
               print('已存在 signingConfigs，跳过注入')
           else:
