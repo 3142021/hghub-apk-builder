@@ -21,10 +21,13 @@ jobs:
       - name: Checkout builder repo
         uses: actions/checkout@v4
 
-      - name: Clone upstream HGhub source
+      - name: Prepare HGhub source (vendored snapshot)
         run: |
-          git clone --depth 1 https://github.com/Minireel/HGhub.git app
-          echo "upstream commit: $(git -C app rev-parse --short HEAD)"
+          # 上游仓库 2026-11-10 已清空（仅剩 README），改用自存档的 v1.2.1 源码快照
+          mkdir -p app
+          unzip -q vendor/hghub-src.zip -d app
+          echo "source files: $(find app -type f | wc -l)"
+          grep '"version"' app/package.json
 
       - name: Apply browser patches
         run: |
