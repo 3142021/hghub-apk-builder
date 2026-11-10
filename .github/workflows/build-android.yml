@@ -3,6 +3,8 @@ name: Build HGhub APK (arm64 release)
 on:
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/build-android.yml"
   workflow_dispatch:
 
 permissions:
