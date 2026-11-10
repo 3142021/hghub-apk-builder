@@ -1,0 +1,117 @@
+name: Build HGhub Web
+
+# 触发：patches 或本文件变更时，或手动 Run workflow
+on:
+  push:
+    branches: [main]
+    paths:
+      - "patches/**"
+      - ".github/workflows/build-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      - name: Clone upstream HGhub source
+        run: |
+          git clone --depth 1 https://github.com/Minireel/HGhub.git app
+          echo "upstream commit: $(git -C app rev-parse --short HEAD)"
+
+      - name: Apply browser patches
+        run: |
+          cp patches/browser-bridge.ts app/src/browser-bridge.ts
+          cp patches/browser-window.ts app/src/browser-window.ts
+          python3 - <<'PYEOF'
+          from pathlib import Path
+
+          # 1) api.ts: 浏览器环境下本地媒体协议改用同源相对路径
+          p = Path('app/src/api.ts')
+          s = p.read_text(encoding='utf-8')
+          old = 'export const LOCAL = isMacos || isIos || isLinux ? "hg://localhost" : "http://hg.localhost";'
+          new = ('const inBrowser = typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);\n'
+                 'export const LOCAL = inBrowser\n'
+                 '  ? ""\n'
+                 '  : isMacos || isIos || isLinux ? "hg://localhost" : "http://hg.localhost";')
+          assert old in s, 'api.ts: LOCAL 行未找到'
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          print('api.ts patched')
+
+          # 2) vite.config.ts: 把 @tauri-apps/api 两个子模块 alias 到浏览器垫片
+          p = Path('app/vite.config.ts')
+          s = p.read_text(encoding='utf-8')
+          old_import = 'import { readFileSync } from "node:fs";'
+          new_import = ('import { readFileSync } from "node:fs";\n'
+                        'import { fileURLToPath } from "node:url";')
+          assert old_import in s, 'vite.config.ts: import 行未找到'
+          s = s.replace(old_import, new_import, 1)
+
+          old_cfg = 'export default defineConfig({\n  plugins: [react(), tailwindcss()],'
+          new_cfg = ('export default defineConfig({\n'
+                     '  plugins: [react(), tailwindcss()],\n'
+                     '  resolve: {\n'
+                     '    alias: {\n'
+                     '      "@tauri-apps/api/core": fileURLToPath(new URL("./src/browser-bridge.ts", import.meta.url)),\n'
+                     '      "@tauri-apps/api/window": fileURLToPath(new URL("./src/browser-window.ts", import.meta.url)),\n'
+                     '    },\n'
+                     '  },')
+          assert old_cfg in s, 'vite.config.ts: defineConfig 块未找到'
+          s = s.replace(old_cfg, new_cfg, 1)
+          p.write_text(s, encoding='utf-8')
+          print('vite.config.ts patched')
+          PYEOF
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm 10
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: pnpm install
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: app
+        run: pnpm build
+
+      - name: Package dist
+        run: |
+          cd app
+          ls -lh dist | head -5
+          zip -qr "$GITHUB_WORKSPACE/hghub-web-dist.zip" dist
+          ls -lh "$GITHUB_WORKSPACE/hghub-web-dist.zip"
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hghub-web-dist
+          path: hghub-web-dist.zip
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: web-${{ github.run_number }}
+          name: HGhub Web dist (build ${{ github.run_number }})
+          body: |
+            HGhub 前端的浏览器版构建（配合本地 Python 服务使用）。
+            仅限个人学习自用，遵循上游 PolyForm Noncommercial 1.0.0 许可证，禁止商业使用。
+          files: hghub-web-dist.zip
+          fail_on_unmatched_files: false
