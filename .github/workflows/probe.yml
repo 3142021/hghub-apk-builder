@@ -1,0 +1,43 @@
+name: Probe upstream API
+
+# 只手动触发，用于判断上游短剧接口是否仍然可用
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe upstream endpoints
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+          B='https://huangguoai.com'
+
+          echo "=== A: 首页 ==="
+          curl -sS -A "$UA" -o /tmp/home -w "http=%{http_code} size=%{size_download} time=%{time_total}s\n" --max-time 25 "$B/" || true
+          head -c 200 /tmp/home 2>/dev/null; echo
+
+          echo "=== B: 直接 GET /api/videos ==="
+          curl -sS -A "$UA" -H 'Accept: application/json' -w "\nhttp=%{http_code}\n" --max-time 25 "$B/api/videos?page=1&size=2" | head -c 600
+          echo
+
+          echo "=== C: edge 信封 POST -> /api/videos?page=1&size=2 （APK 实际调用方式）==="
+          curl -sS -A "$UA" -H 'Content-Type: application/json' -H 'Accept: application/json' -H "Referer: $B/" \
+            -X POST -d '{"method":"GET","path":"/api/videos?page=1&size=2","body":"","content_type":""}' \
+            -w "\nhttp=%{http_code}\n" --max-time 25 "$B/api/edge/request" | head -c 1500
+          echo
+
+          echo "=== D: edge 信封 POST -> /api/ranks/hot ==="
+          curl -sS -A "$UA" -H 'Content-Type: application/json' -H 'Accept: application/json' -H "Referer: $B/" \
+            -X POST -d '{"method":"GET","path":"/api/ranks/hot","body":"","content_type":""}' \
+            -w "\nhttp=%{http_code}\n" --max-time 25 "$B/api/edge/request" | head -c 1200
+          echo
+
+          echo "=== E: 备用线路 huangguoai.ai ==="
+          curl -sS -A "$UA" -o /dev/null -w "http=%{http_code} size=%{size_download} time=%{time_total}s\n" --max-time 25 'https://huangguoai.ai/' || true
+
+          echo "=== F: 镜像发布页 ==="
+          curl -sS -A "$UA" -w "\nhttp=%{http_code}\n" --max-time 25 'https://huangguoai.pages.dev/publish.js' | head -c 500
+          echo
+          echo "=== 探测结束 ==="
